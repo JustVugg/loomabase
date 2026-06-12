@@ -1,0 +1,2 @@
+[functions.loomabase-sync]
+verify_jwt = false
