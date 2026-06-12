@@ -121,7 +121,7 @@ Add the crate from the repository while Loomabase is pre-release:
 
 ```toml
 [dependencies]
-loomabase = { git = "https://github.com/loomabase/loomabase" }
+loomabase = { git = "https://github.com/JustVugg/loomabase" }
 ```
 
 Initialize a SQLite client:
