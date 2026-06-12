@@ -1,0 +1,23 @@
+services:
+  loomabase:
+    image: ${LOOMABASE_IMAGE:?set LOOMABASE_IMAGE to an immutable image digest}
+    restart: unless-stopped
+    env_file:
+      - loomabase.env
+    environment:
+      LOOMABASE_BIND: 0.0.0.0:8080
+      LOOMABASE_SKIP_SCHEMA_INIT: "true"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - 127.0.0.1:8080:8080
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
