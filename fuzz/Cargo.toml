@@ -1,0 +1,27 @@
+[package]
+name = "loomabase-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+loomabase = { path = ".." }
+serde_json = "1"
+
+[[bin]]
+name = "sync_payload"
+path = "fuzz_targets/sync_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "partial_replica"
+path = "fuzz_targets/partial_replica.rs"
+test = false
+doc = false
+bench = false
