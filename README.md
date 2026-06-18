@@ -121,7 +121,7 @@ Add the crate from the repository while Loomabase is pre-release:
 
 ```toml
 [dependencies]
-loomabase = { git = "https://github.com/JustVugg/loomabase" }
+loomabase = { git = "https://github.com/loomabase/loomabase" }
 ```
 
 Initialize a SQLite client:
@@ -394,12 +394,92 @@ fuzz both base-sync and partial-replica protocol inputs. Use
 [public benchmark methodology](benchmarks/README.md) for reproducible load
 tests.
 
-## Security
+## Security & Best Practices
 
-Read [SECURITY.md](SECURITY.md) before production deployment. Loomabase validates
-payload-controlled data and never interpolates untrusted SQL identifiers, but
-operators remain responsible for TLS, gateway rate limiting, Supabase/project
-configuration, backups, monitoring, and executing the release gates.
+Read [SECURITY.md](SECURITY.md) before production deployment. Loomabase treats
+every sync payload as untrusted input. The CRDT merge is deterministic and
+idempotent, but it is not an authorization system: a valid authenticated writer
+can still submit a valid newer value. Use Loomabase together with application
+authorization, schema contracts, validation, rate limits, and audit logging.
+
+### Malicious or Malformed CRDT Updates
+
+Loomabase rejects malformed or unsafe payloads before mutation:
+
+- protocol versions must be supported during the rolling-upgrade window;
+- schema fingerprints must match the server contract;
+- table and column names come from validated `TableDef` contracts, never from
+  payload-controlled SQL identifiers;
+- values are type-checked against the contract and written with SQL parameters;
+- row counts, cell counts, identifier lengths, value sizes, response sizes,
+  finite numbers, cursor capabilities, and Lamport clock advances are bounded;
+- the authenticated `device_id` must match every submitted mutation, preventing
+  device-attribution spoofing;
+- the authenticated `tenant_id`, not any payload field, scopes the PostgreSQL
+  transaction and Row-Level Security context.
+
+Once a payload is valid and authorized, conflicts are resolved per column with
+the documented LWW order: `(lamport_clock, device_id)`. Older writes and
+duplicate deliveries are harmless. Equal versions with different values are
+rejected because one CRDT version cannot safely identify two different states.
+For user-facing diagnostics, expose `explain::explain_lww` so operators can see
+which value won and why.
+
+### Data Validation Before Sync
+
+Validate data at the application boundary before it reaches the sync engine.
+Recommended checks:
+
+- enforce per-user and per-tenant write permissions before calling
+  `merge_crdt_states`;
+- reject fields the authenticated user cannot edit, even if the table contract
+  contains them;
+- validate domain rules such as length, enum membership, numeric ranges,
+  foreign-key ownership, and state transitions;
+- keep secrets, access tokens, API keys, and password material out of
+  synchronized tables;
+- use PostgreSQL constraints and forced RLS as defense in depth, not as a
+  replacement for API-layer authorization;
+- store audit events for security-relevant writes and conflict decisions.
+
+For Supabase deployments, keep tenant and table authorization in trusted
+`app_metadata` claims. Do not rely on user-editable `user_metadata` for sync
+authorization.
+
+### Sync Endpoint Hardening
+
+Expose `/sync` and `/sync/partial` only over TLS and require a signed
+`Authorization: Bearer` token. In production, put the reference server behind a
+gateway or load balancer that applies body-size, request-rate, connection, and
+IP reputation limits in addition to Loomabase's built-in request, body,
+concurrency, statement, lock, and pool limits.
+
+For browser clients, configure CORS as an allowlist:
+
+```http
+Access-Control-Allow-Origin: https://app.example.com
+Access-Control-Allow-Methods: POST, OPTIONS
+Access-Control-Allow-Headers: Authorization, Content-Type
+Access-Control-Max-Age: 600
+Vary: Origin
+```
+
+Avoid `Access-Control-Allow-Origin: *` on authenticated sync endpoints, and do
+not combine wildcard origins with credentials. If cookies are used instead of
+bearer tokens, require `SameSite=Lax` or `SameSite=Strict`, `Secure`, and CSRF
+protection.
+
+Content Security Policy belongs on the browser application and any HTML served
+by your gateway. A sync endpoint that returns JSON does not need to execute
+script, but the web app should restrict where it can send sync traffic:
+
+```http
+Content-Security-Policy: default-src 'self'; connect-src 'self' https://api.example.com https://*.supabase.co; object-src 'none'; base-uri 'none'; frame-ancestors 'none'
+```
+
+Also set `Content-Type: application/json`, `X-Content-Type-Options: nosniff`,
+`Cache-Control: no-store` for sync responses, `Referrer-Policy: no-referrer`,
+and HSTS at the TLS termination layer.
 
 ## Roadmap
 
