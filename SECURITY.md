@@ -38,6 +38,57 @@ Loomabase treats every synchronization payload as untrusted input.
   defense in depth.
 - Secrets and bearer tokens must never be stored in synchronized tables.
 
+Conflict resolution is deliberately deterministic, not trust-based. A valid
+authenticated writer can submit a valid newer CRDT cell and win the LWW order,
+so applications must enforce write authorization and domain validation before
+calling the merge. Malformed versions, schema mismatches, type mismatches,
+oversized payloads, spoofed device attribution, cursor forgeries, excessive
+Lamport advances, non-finite numbers, and equal CRDT versions with different
+values are rejected before mutation.
+
+When exposing conflict decisions to users or operators, use
+`explain::explain_lww` instead of reimplementing the ordering rules in an API or
+UI layer.
+
+## Integration Best Practices
+
+Validate synchronized data at the application boundary:
+
+- authorize each write against the authenticated user, tenant, table, row, and
+  field;
+- reject fields the caller cannot edit, even if the contract contains them;
+- enforce domain rules such as string length, enum membership, numeric ranges,
+  foreign-key ownership, and allowed state transitions;
+- keep credentials, secrets, access tokens, API keys, and password material out
+  of synchronized tables;
+- use PostgreSQL constraints and forced RLS as defense in depth;
+- record audit events for security-sensitive writes and conflict outcomes.
+
+For browser clients, expose sync endpoints with a strict CORS allowlist:
+
+```http
+Access-Control-Allow-Origin: https://app.example.com
+Access-Control-Allow-Methods: POST, OPTIONS
+Access-Control-Allow-Headers: Authorization, Content-Type
+Access-Control-Max-Age: 600
+Vary: Origin
+```
+
+Do not use wildcard origins for authenticated sync traffic. If cookies are used
+instead of bearer tokens, require `Secure`, `SameSite=Lax` or
+`SameSite=Strict`, and CSRF protection.
+
+Content Security Policy is configured on browser-facing HTML, not inside the
+CRDT merge. A typical web application should restrict sync egress:
+
+```http
+Content-Security-Policy: default-src 'self'; connect-src 'self' https://api.example.com https://*.supabase.co; object-src 'none'; base-uri 'none'; frame-ancestors 'none'
+```
+
+For JSON sync responses, set `Content-Type: application/json`,
+`X-Content-Type-Options: nosniff`, `Cache-Control: no-store`,
+`Referrer-Policy: no-referrer`, and HSTS at the TLS termination layer.
+
 ## Deployment Responsibilities
 
 The crate is a synchronization engine, not an authorization server. Production
