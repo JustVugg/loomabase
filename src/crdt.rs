@@ -1,9 +1,13 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, SyncError};
+use crate::policy::{
+    AllowAllAuthorizer, CellMutation, NoopValidator, PolicyDecision, SyncContext, SyncSecurity,
+};
 use crate::replica::{PartialReplicaRequest, PartialReplicaResponse};
 use crate::schema::{ColumnType, TableDef};
 
@@ -21,6 +25,7 @@ pub const MAX_PAYLOAD_CELLS: usize = 20_000;
 pub const MAX_RESPONSE_CELLS: usize = 1_000;
 pub const MAX_RESPONSE_BYTES: usize = 4 * 1_048_576;
 pub const MAX_TEXT_BYTES: usize = 1_048_576;
+pub const MAX_REJECTION_REASON_BYTES: usize = 2_048;
 pub const MAX_STORABLE_LAMPORT: u64 = i64::MAX as u64;
 pub const MAX_CLOCK_ADVANCE_PER_SYNC: u64 = 1_000_000;
 
@@ -55,6 +60,23 @@ pub struct RowChange {
     pub columns: BTreeMap<String, CrdtColumn>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncRejectionKind {
+    AuthorizationDenied,
+    ValidationFailed,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SyncRejection {
+    pub todo_id: String,
+    pub column_name: String,
+    pub kind: SyncRejectionKind,
+    pub reason: String,
+    pub value: CrdtValue,
+    pub metadata: ColumnMetadata,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SyncPayload {
     pub protocol_version: u16,
@@ -83,6 +105,11 @@ pub struct SyncPayload {
     /// clients automatically discard cursors from a different history.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_epoch: Option<String>,
+    /// Valid, authenticated cells that the server deliberately did not merge
+    /// because authorization or business validation rejected them. Malformed
+    /// cells are still hard protocol errors and never appear here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rejections: Vec<SyncRejection>,
 }
 
 impl SyncPayload {
@@ -103,6 +130,7 @@ impl SyncPayload {
             cursor_reset: false,
             cursor_token: None,
             server_epoch: None,
+            rejections: Vec::new(),
         }
     }
 
@@ -138,6 +166,11 @@ impl SyncPayload {
         if self.changes.len() > MAX_PAYLOAD_ROWS {
             return Err(SyncError::InvalidPayload(format!(
                 "payload exceeds the {MAX_PAYLOAD_ROWS} changed-row limit"
+            )));
+        }
+        if self.rejections.len() > MAX_PAYLOAD_CELLS {
+            return Err(SyncError::InvalidPayload(format!(
+                "payload exceeds the {MAX_PAYLOAD_CELLS} rejected-cell limit"
             )));
         }
 
@@ -176,6 +209,16 @@ impl SyncPayload {
                 }
             }
         }
+        for rejection in &self.rejections {
+            validate_identifier("rejection.todo_id", &rejection.todo_id)?;
+            validate_column(table, &rejection.column_name, &rejection.value)?;
+            validate_identifier(
+                "rejection.metadata.device_id",
+                &rejection.metadata.device_id,
+            )?;
+            validate_clock(rejection.metadata.lamport_clock)?;
+            validate_rejection_reason(&rejection.reason)?;
+        }
 
         Ok(())
     }
@@ -201,6 +244,11 @@ impl SyncPayload {
         if self.has_more || self.cursor_reset {
             return Err(SyncError::InvalidPayload(
                 "a client request cannot set response-only cursor flags".to_owned(),
+            ));
+        }
+        if !self.rejections.is_empty() {
+            return Err(SyncError::InvalidPayload(
+                "a client request cannot contain server rejection records".to_owned(),
             ));
         }
 
@@ -232,10 +280,16 @@ impl SyncPayload {
             .changes
             .iter()
             .flat_map(|row| row.columns.values())
-            .any(|column| column.metadata.lamport_clock > self.source_lamport)
+            .map(|column| column.metadata.lamport_clock)
+            .chain(
+                self.rejections
+                    .iter()
+                    .map(|rejection| rejection.metadata.lamport_clock),
+            )
+            .any(|clock| clock > self.source_lamport)
         {
             return Err(SyncError::InvalidPayload(
-                "a response column clock cannot exceed the server source clock".to_owned(),
+                "a response cell clock cannot exceed the server source clock".to_owned(),
             ));
         }
         Ok(())
@@ -256,6 +310,35 @@ pub enum MergeDecision {
     AcceptIncoming,
     KeepCurrent,
     Equal,
+}
+
+impl SyncRejection {
+    pub fn new(
+        todo_id: impl Into<String>,
+        column_name: impl Into<String>,
+        kind: SyncRejectionKind,
+        reason: impl Into<String>,
+        value: CrdtValue,
+        metadata: ColumnMetadata,
+    ) -> Result<Self> {
+        let rejection = Self {
+            todo_id: todo_id.into(),
+            column_name: column_name.into(),
+            kind,
+            reason: reason.into(),
+            value,
+            metadata,
+        };
+        validate_identifier("rejection.todo_id", &rejection.todo_id)?;
+        validate_identifier("rejection.column_name", &rejection.column_name)?;
+        validate_identifier(
+            "rejection.metadata.device_id",
+            &rejection.metadata.device_id,
+        )?;
+        validate_clock(rejection.metadata.lamport_clock)?;
+        validate_rejection_reason(&rejection.reason)?;
+        Ok(rejection)
+    }
 }
 
 #[must_use]
@@ -306,8 +389,21 @@ impl CrdtState {
         client_payload: SyncPayload,
         authenticated_device_id: &str,
     ) -> Result<SyncPayload> {
+        self.merge_with_security(
+            client_payload,
+            authenticated_device_id,
+            &SyncSecurity::without_audit(Arc::new(AllowAllAuthorizer), Arc::new(NoopValidator)),
+        )
+    }
+
+    pub fn merge_with_security(
+        &mut self,
+        client_payload: SyncPayload,
+        authenticated_device_id: &str,
+        security: &SyncSecurity,
+    ) -> Result<SyncPayload> {
         let mut working = self.clone();
-        let response = working.merge_inner(client_payload, authenticated_device_id)?;
+        let response = working.merge_inner(client_payload, authenticated_device_id, security)?;
         *self = working;
         Ok(response)
     }
@@ -399,16 +495,65 @@ impl CrdtState {
         &mut self,
         client_payload: SyncPayload,
         authenticated_device_id: &str,
+        security: &SyncSecurity,
     ) -> Result<SyncPayload> {
         client_payload.validate_client_request(authenticated_device_id, &self.table)?;
         let response_protocol_version = client_payload.protocol_version;
         let observed_clock = client_payload.max_observed_clock();
         validate_clock_advance(self.global_lamport, observed_clock)?;
+        let context = SyncContext {
+            tenant_id: "reference-tenant",
+            authenticated_device_id,
+            table: &self.table,
+        };
+        let mut rejections = Vec::new();
 
         for row in client_payload.changes {
             for (column_name, incoming) in row.columns {
-                let key = (row.todo_id.clone(), column_name);
-                let apply = match self.cells.get(&key) {
+                let key = (row.todo_id.clone(), column_name.clone());
+                let current = self.cells.get(&key);
+                let mutation = CellMutation {
+                    todo_id: &row.todo_id,
+                    column_name: &column_name,
+                    value: &incoming.value,
+                    metadata: &incoming.metadata,
+                };
+                match security
+                    .authorizer()
+                    .authorize_cell(&context, &mutation, current)?
+                {
+                    PolicyDecision::Allow => {}
+                    PolicyDecision::Deny { kind, reason } => {
+                        rejections.push(SyncRejection::new(
+                            &row.todo_id,
+                            &column_name,
+                            kind,
+                            reason,
+                            incoming.value.clone(),
+                            incoming.metadata.clone(),
+                        )?);
+                        continue;
+                    }
+                }
+                match security
+                    .validator()
+                    .validate_cell(&context, &mutation, current)?
+                {
+                    PolicyDecision::Allow => {}
+                    PolicyDecision::Deny { kind, reason } => {
+                        rejections.push(SyncRejection::new(
+                            &row.todo_id,
+                            &column_name,
+                            kind,
+                            reason,
+                            incoming.value.clone(),
+                            incoming.metadata.clone(),
+                        )?);
+                        continue;
+                    }
+                }
+
+                let apply = match current {
                     None => true,
                     Some(current) => match decide_lww(&current.metadata, &incoming.metadata) {
                         MergeDecision::AcceptIncoming => true,
@@ -508,6 +653,7 @@ impl CrdtState {
             cursor_reset,
             cursor_token: None,
             server_epoch: None,
+            rejections,
         })
     }
 }
@@ -549,6 +695,18 @@ pub fn validate_identifier(field: &str, value: &str) -> Result<()> {
     if value.is_empty() || value.len() > 255 || value.chars().any(char::is_control) {
         return Err(SyncError::InvalidPayload(format!(
             "{field} must contain between 1 and 255 non-control characters"
+        )));
+    }
+    Ok(())
+}
+
+pub fn validate_rejection_reason(reason: &str) -> Result<()> {
+    if reason.is_empty()
+        || reason.len() > MAX_REJECTION_REASON_BYTES
+        || reason.chars().any(char::is_control)
+    {
+        return Err(SyncError::InvalidPayload(format!(
+            "rejection reason must contain between 1 and {MAX_REJECTION_REASON_BYTES} non-control bytes"
         )));
     }
     Ok(())

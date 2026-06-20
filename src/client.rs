@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -334,7 +334,7 @@ impl SqliteClient {
         let table = Arc::clone(&self.table);
         self.run(move |connection| {
             let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            acknowledge_local_delta(&tx, &sent, &table)?;
+            acknowledge_local_delta_with_response(&tx, &sent, &response, &table)?;
             apply_remote_payload(&tx, &response, &table)?;
             tx.commit()?;
             Ok(())
@@ -670,6 +670,7 @@ pub fn get_local_delta(tx: &Transaction<'_>, table: &TableDef) -> Result<SyncPay
         cursor_reset: false,
         cursor_token,
         server_epoch,
+        rejections: Vec::new(),
     };
     payload.validate_client_request(&payload.source_device_id, table)?;
     Ok(payload)
@@ -695,6 +696,63 @@ pub fn acknowledge_local_delta(
     );
     for row in &payload.changes {
         for (column_name, column) in &row.columns {
+            tx.execute(
+                &sql,
+                params![
+                    row.todo_id,
+                    column_name,
+                    clock_to_i64(column.metadata.lamport_clock)?,
+                    column.metadata.device_id
+                ],
+            )?;
+        }
+    }
+    cleanup_pending_evictions(tx, table)?;
+    Ok(())
+}
+
+pub fn acknowledge_local_delta_with_response(
+    tx: &Transaction<'_>,
+    sent: &SyncPayload,
+    response: &SyncPayload,
+    table: &TableDef,
+) -> Result<()> {
+    response.validate_server_response(table)?;
+    let local_device_id: String = tx.query_row(
+        "SELECT device_id FROM client_state WHERE singleton = 1",
+        [],
+        |row| row.get(0),
+    )?;
+    sent.validate_client_request(&local_device_id, table)?;
+    let rejected_versions = response
+        .rejections
+        .iter()
+        .map(|rejection| {
+            (
+                rejection.todo_id.clone(),
+                rejection.column_name.clone(),
+                rejection.metadata.lamport_clock,
+                rejection.metadata.device_id.clone(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let sql = format!(
+        "UPDATE {} SET dirty = 0
+         WHERE todo_id = ?1 AND column_name = ?2
+           AND lamport_clock = ?3 AND device_id = ?4",
+        table.crdt_table()
+    );
+    for row in &sent.changes {
+        for (column_name, column) in &row.columns {
+            let key = (
+                row.todo_id.clone(),
+                column_name.clone(),
+                column.metadata.lamport_clock,
+                column.metadata.device_id.clone(),
+            );
+            if rejected_versions.contains(&key) {
+                continue;
+            }
             tx.execute(
                 &sql,
                 params![
@@ -807,7 +865,7 @@ pub fn apply_partial_replica_response(
         ));
     }
 
-    acknowledge_local_delta(tx, &sent.sync, table)?;
+    acknowledge_local_delta_with_response(tx, &sent.sync, &response.sync, table)?;
     apply_remote_payload(tx, &response.sync, table)?;
 
     tx.execute(

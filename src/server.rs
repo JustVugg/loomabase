@@ -10,10 +10,15 @@ use sqlx_postgres::{PgPool, Postgres};
 
 use crate::crdt::{
     ColumnMetadata, CrdtColumn, CrdtValue, MAX_PAYLOAD_CELLS, MAX_RESPONSE_BYTES,
-    MAX_RESPONSE_CELLS, MergeDecision, RowChange, SERVER_DEVICE_ID, SyncPayload, decide_lww,
-    validate_clock_advance, validate_identifier,
+    MAX_RESPONSE_CELLS, MergeDecision, RowChange, SERVER_DEVICE_ID, SyncPayload, SyncRejection,
+    decide_lww, validate_clock_advance, validate_identifier,
 };
 use crate::error::{Result, SyncError};
+use crate::explain::explain_lww;
+use crate::policy::{
+    AuditMode, CellMutation, PolicyDecision, SyncAuditEvent, SyncAuditOutcome, SyncContext,
+    SyncSecurity,
+};
 use crate::replica::{
     PartialReplicaRequest, PartialReplicaResponse, ReplicaPredicate, validate_member_ids,
 };
@@ -128,6 +133,28 @@ pub async fn merge_crdt_states(
     tenant_id: &str,
     table: &TableDef,
 ) -> Result<SyncPayload> {
+    let security = SyncSecurity::default();
+    merge_crdt_states_with_security(
+        server_tx,
+        client_payload,
+        client_device_id,
+        tenant_id,
+        table,
+        &security,
+    )
+    .await
+}
+
+/// Transactional, tenant-scoped `PostgreSQL` merge with explicit authorization,
+/// business validation, rejection reporting, and optional database audit.
+pub async fn merge_crdt_states_with_security(
+    server_tx: &mut Transaction<'_, Postgres>,
+    client_payload: SyncPayload,
+    client_device_id: &str,
+    tenant_id: &str,
+    table: &TableDef,
+    security: &SyncSecurity,
+) -> Result<SyncPayload> {
     validate_identifier("tenant_id", tenant_id)?;
     client_payload.validate_client_request(client_device_id, table)?;
     let observed_clock = client_payload.max_observed_clock();
@@ -149,6 +176,12 @@ pub async fn merge_crdt_states(
         .bind(tenant_id)
         .execute(&mut **server_tx)
         .await?;
+    let context = SyncContext {
+        tenant_id,
+        authenticated_device_id: client_device_id,
+        table,
+    };
+    let mut rejections = Vec::new();
 
     // Lazily create and lock only this tenant's clock row, so concurrent tenants
     // never serialize against each other.
@@ -187,24 +220,92 @@ pub async fn merge_crdt_states(
                 .fetch_optional(&mut **server_tx)
                 .await?;
 
-            let should_apply = match current {
-                None => true,
-                Some((Json(current_value), clock, device_id)) => {
-                    let current_metadata = ColumnMetadata {
-                        lamport_clock: clock_from_i64(clock)?,
-                        device_id,
-                    };
-                    match decide_lww(&current_metadata, &incoming.metadata) {
-                        MergeDecision::AcceptIncoming => true,
-                        MergeDecision::KeepCurrent => false,
-                        MergeDecision::Equal if current_value == incoming.value => false,
-                        MergeDecision::Equal => {
-                            return Err(SyncError::InvalidPayload(
-                                "the same CRDT version cannot identify different values".to_owned(),
-                            ));
-                        }
-                    }
+            let current_column = current
+                .map(|(Json(value), clock, device_id)| {
+                    Ok::<_, SyncError>(CrdtColumn {
+                        value,
+                        metadata: ColumnMetadata {
+                            lamport_clock: clock_from_i64(clock)?,
+                            device_id,
+                        },
+                    })
+                })
+                .transpose()?;
+            let mutation = CellMutation {
+                todo_id: &row.todo_id,
+                column_name,
+                value: &incoming.value,
+                metadata: &incoming.metadata,
+            };
+
+            match security.authorizer().authorize_cell(
+                &context,
+                &mutation,
+                current_column.as_ref(),
+            )? {
+                PolicyDecision::Allow => {}
+                PolicyDecision::Deny { kind, reason } => {
+                    rejections.push(SyncRejection::new(
+                        &row.todo_id,
+                        column_name,
+                        kind.clone(),
+                        reason.clone(),
+                        incoming.value.clone(),
+                        incoming.metadata.clone(),
+                    )?);
+                    let event = SyncAuditEvent::new(
+                        &context,
+                        &mutation,
+                        current_column.as_ref(),
+                        rejection_audit_outcome(&kind),
+                        reason,
+                    )?;
+                    record_audit_if_enabled(server_tx, tenant_id, security, &event).await?;
+                    continue;
                 }
+            }
+            match security.validator().validate_cell(
+                &context,
+                &mutation,
+                current_column.as_ref(),
+            )? {
+                PolicyDecision::Allow => {}
+                PolicyDecision::Deny { kind, reason } => {
+                    rejections.push(SyncRejection::new(
+                        &row.todo_id,
+                        column_name,
+                        kind.clone(),
+                        reason.clone(),
+                        incoming.value.clone(),
+                        incoming.metadata.clone(),
+                    )?);
+                    let event = SyncAuditEvent::new(
+                        &context,
+                        &mutation,
+                        current_column.as_ref(),
+                        rejection_audit_outcome(&kind),
+                        reason,
+                    )?;
+                    record_audit_if_enabled(server_tx, tenant_id, security, &event).await?;
+                    continue;
+                }
+            }
+
+            let explanation = explain_lww(current_column.as_ref(), incoming);
+            let (should_apply, audit_outcome) = match current_column.as_ref() {
+                None => (true, SyncAuditOutcome::Accepted),
+                Some(current) => match decide_lww(&current.metadata, &incoming.metadata) {
+                    MergeDecision::AcceptIncoming => (true, SyncAuditOutcome::Accepted),
+                    MergeDecision::KeepCurrent => (false, SyncAuditOutcome::KeptCurrent),
+                    MergeDecision::Equal if current.value == incoming.value => {
+                        (false, SyncAuditOutcome::Idempotent)
+                    }
+                    MergeDecision::Equal => {
+                        return Err(SyncError::InvalidPayload(
+                            "the same CRDT version cannot identify different values".to_owned(),
+                        ));
+                    }
+                },
             };
 
             if should_apply {
@@ -236,6 +337,14 @@ pub async fn merge_crdt_states(
                 .execute(&mut **server_tx)
                 .await?;
             }
+            let event = SyncAuditEvent::new(
+                &context,
+                &mutation,
+                current_column.as_ref(),
+                audit_outcome,
+                explanation.summary,
+            )?;
+            record_audit_if_enabled(server_tx, tenant_id, security, &event).await?;
         }
     }
 
@@ -377,6 +486,7 @@ pub async fn merge_crdt_states(
         cursor_reset,
         cursor_token: Some(cursor_token),
         server_epoch: Some(server_epoch),
+        rejections,
     })
 }
 
@@ -391,13 +501,42 @@ pub async fn merge_partial_replica(
     tenant_id: &str,
     table: &TableDef,
 ) -> Result<PartialReplicaResponse> {
+    let security = SyncSecurity::default();
+    merge_partial_replica_with_security(
+        server_tx,
+        request,
+        client_device_id,
+        tenant_id,
+        table,
+        &security,
+    )
+    .await
+}
+
+/// Merges a partial-replica request through the same authorization,
+/// validation, rejection, and audit path as full sync.
+pub async fn merge_partial_replica_with_security(
+    server_tx: &mut Transaction<'_, Postgres>,
+    request: PartialReplicaRequest,
+    client_device_id: &str,
+    tenant_id: &str,
+    table: &TableDef,
+    security: &SyncSecurity,
+) -> Result<PartialReplicaResponse> {
     request.validate(table, client_device_id)?;
     let scope_id = request.scope_id.clone();
     let scope_version = request.scope_version;
     let interest = request.interest.clone();
     let known_member_ids = request.known_member_ids.clone();
-    let mut sync =
-        merge_crdt_states(server_tx, request.sync, client_device_id, tenant_id, table).await?;
+    let mut sync = merge_crdt_states_with_security(
+        server_tx,
+        request.sync,
+        client_device_id,
+        tenant_id,
+        table,
+        security,
+    )
+    .await?;
 
     let mut membership_query = QueryBuilder::<Postgres>::new(format!(
         "SELECT id FROM {} WHERE tenant_id = ",
@@ -556,6 +695,73 @@ pub async fn rotate_server_epoch(pool: &PgPool) -> Result<String> {
         .await?;
     tx.commit().await?;
     Ok(epoch)
+}
+
+async fn record_audit_if_enabled(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    security: &SyncSecurity,
+    event: &SyncAuditEvent,
+) -> Result<()> {
+    if security.audit_mode() == AuditMode::Disabled {
+        return Ok(());
+    }
+    write_audit_event(tx, tenant_id, event).await
+}
+
+async fn write_audit_event(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    event: &SyncAuditEvent,
+) -> Result<()> {
+    sqlx_core::query::query(
+        "INSERT INTO loomabase_audit_log
+            (tenant_id, table_name, todo_id, column_name, device_id, outcome, reason,
+             incoming_value, incoming_lamport, incoming_device_id,
+             current_value, current_lamport, current_device_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+    )
+    .bind(tenant_id)
+    .bind(&event.table_name)
+    .bind(&event.todo_id)
+    .bind(&event.column_name)
+    .bind(&event.incoming_metadata.device_id)
+    .bind(event.outcome.as_str())
+    .bind(&event.reason)
+    .bind(Json(&event.incoming_value))
+    .bind(clock_to_i64(event.incoming_metadata.lamport_clock)?)
+    .bind(&event.incoming_metadata.device_id)
+    .bind(
+        event
+            .current_value
+            .as_ref()
+            .map(|value| Json(value.clone())),
+    )
+    .bind(
+        event
+            .current_metadata
+            .as_ref()
+            .map(|metadata| clock_to_i64(metadata.lamport_clock))
+            .transpose()?,
+    )
+    .bind(
+        event
+            .current_metadata
+            .as_ref()
+            .map(|metadata| metadata.device_id.clone()),
+    )
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+fn rejection_audit_outcome(kind: &crate::crdt::SyncRejectionKind) -> SyncAuditOutcome {
+    match kind {
+        crate::crdt::SyncRejectionKind::AuthorizationDenied => {
+            SyncAuditOutcome::RejectedAuthorization
+        }
+        crate::crdt::SyncRejectionKind::ValidationFailed => SyncAuditOutcome::RejectedValidation,
+    }
 }
 
 async fn write_server_todo_column(

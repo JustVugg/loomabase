@@ -11,6 +11,7 @@ pub mod error;
 pub mod explain;
 #[cfg(feature = "server")]
 pub mod http;
+pub mod policy;
 pub mod replica;
 pub mod schema;
 pub mod server;

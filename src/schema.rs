@@ -457,6 +457,27 @@ CREATE TABLE IF NOT EXISTS loomabase_server_state (
 INSERT INTO loomabase_server_state(singleton, server_epoch)
 VALUES (TRUE, gen_random_uuid()::text)
 ON CONFLICT(singleton) DO NOTHING;
+CREATE TABLE IF NOT EXISTS loomabase_audit_log (
+    audit_id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    tenant_id TEXT NOT NULL,
+    table_name TEXT NOT NULL,
+    todo_id TEXT NOT NULL,
+    column_name TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    incoming_value JSONB NOT NULL,
+    incoming_lamport BIGINT NOT NULL CHECK (incoming_lamport >= 0),
+    incoming_device_id TEXT NOT NULL,
+    current_value JSONB,
+    current_lamport BIGINT CHECK (current_lamport IS NULL OR current_lamport >= 0),
+    current_device_id TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+CREATE INDEX IF NOT EXISTS loomabase_audit_log_tenant_created_idx
+    ON loomabase_audit_log(tenant_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS loomabase_audit_log_cell_idx
+    ON loomabase_audit_log(tenant_id, table_name, todo_id, column_name, created_at DESC);
 CREATE SEQUENCE IF NOT EXISTS loomabase_seq;
 ",
         );
@@ -512,6 +533,7 @@ CREATE INDEX IF NOT EXISTS {crdt}_seq_idx
         for table in [
             "loomabase_state",
             "loomabase_cursor_lease",
+            "loomabase_audit_log",
             self.name(),
             &crdt,
         ] {

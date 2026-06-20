@@ -24,9 +24,10 @@ use tower_http::trace::TraceLayer;
 
 use crate::crdt::SyncPayload;
 use crate::error::SyncError;
+use crate::policy::SyncSecurity;
 use crate::replica::{PartialReplicaRequest, PartialReplicaResponse};
 use crate::schema::TableDef;
-use crate::server::{merge_crdt_states, merge_partial_replica};
+use crate::server::{merge_crdt_states_with_security, merge_partial_replica_with_security};
 
 const DURATION_BUCKETS: [(u64, &str); 9] = [
     (50_000, "0.05"),
@@ -226,6 +227,7 @@ struct AppState {
     pool: PgPool,
     table: Arc<TableDef>,
     authenticator: Arc<dyn DeviceAuthenticator>,
+    security: Arc<SyncSecurity>,
     metrics: Arc<Metrics>,
     config: ServerConfig,
 }
@@ -243,10 +245,29 @@ pub fn app_with_config(
     authenticator: Arc<dyn DeviceAuthenticator>,
     config: ServerConfig,
 ) -> Router {
+    app_with_config_and_security(
+        pool,
+        table,
+        authenticator,
+        config,
+        Arc::new(SyncSecurity::default()),
+    )
+}
+
+/// Builds the application with explicit security hooks. This is the recommended
+/// production integration point for field authorization and business validation.
+pub fn app_with_config_and_security(
+    pool: PgPool,
+    table: TableDef,
+    authenticator: Arc<dyn DeviceAuthenticator>,
+    config: ServerConfig,
+    security: Arc<SyncSecurity>,
+) -> Router {
     let state = AppState {
         pool,
         table: Arc::new(table),
         authenticator,
+        security,
         metrics: Arc::new(Metrics::default()),
         config,
     };
@@ -275,11 +296,13 @@ async fn health(State(state): State<AppState>) -> Response {
             AND to_regclass($2) IS NOT NULL
             AND to_regclass($3) IS NOT NULL
             AND to_regclass($4) IS NOT NULL
-            AND to_regclass($5) IS NOT NULL",
+            AND to_regclass($5) IS NOT NULL
+            AND to_regclass($6) IS NOT NULL",
     )
     .bind("loomabase_state")
     .bind("loomabase_cursor_lease")
     .bind("loomabase_server_state")
+    .bind("loomabase_audit_log")
     .bind(app_table)
     .bind(&crdt_table)
     .fetch_one(&state.pool)
@@ -374,12 +397,13 @@ async fn run_merge(
     let mut tx = state.pool.begin().await?;
     set_transaction_timeout(&mut tx, "statement_timeout", state.config.statement_timeout).await?;
     set_transaction_timeout(&mut tx, "lock_timeout", state.config.lock_timeout).await?;
-    let response = merge_crdt_states(
+    let response = merge_crdt_states_with_security(
         &mut tx,
         payload,
         &identity.device_id,
         &identity.tenant_id,
         state.table.as_ref(),
+        state.security.as_ref(),
     )
     .await?;
     tx.commit().await?;
@@ -449,12 +473,13 @@ async fn run_partial_merge(
     let mut tx = state.pool.begin().await?;
     set_transaction_timeout(&mut tx, "statement_timeout", state.config.statement_timeout).await?;
     set_transaction_timeout(&mut tx, "lock_timeout", state.config.lock_timeout).await?;
-    let response = merge_partial_replica(
+    let response = merge_partial_replica_with_security(
         &mut tx,
         request,
         &identity.device_id,
         &identity.tenant_id,
         state.table.as_ref(),
+        state.security.as_ref(),
     )
     .await?;
     tx.commit().await?;

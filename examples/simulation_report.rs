@@ -31,6 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cursor_reset: false,
         cursor_token: None,
         server_epoch: None,
+        rejections: Vec::new(),
     };
     let mut simulator = NetworkSimulator::new(table);
     simulator.drop_payload(&payload, "device-a");
