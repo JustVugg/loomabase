@@ -34,6 +34,7 @@ fn title_payload() -> SyncPayload {
         cursor_reset: false,
         cursor_token: None,
         server_epoch: None,
+        rejections: Vec::new(),
     }
 }
 
