@@ -11,7 +11,7 @@ $$;
 GRANT USAGE ON SCHEMA public TO loomabase_runtime;
 GRANT SELECT ON loomabase_server_state TO loomabase_runtime;
 GRANT SELECT, INSERT, UPDATE, DELETE
-    ON loomabase_state, loomabase_cursor_lease, todos, todos_crdt
+    ON loomabase_state, loomabase_cursor_lease, loomabase_audit_log, todos, todos_crdt
     TO loomabase_runtime;
 GRANT USAGE, SELECT ON SEQUENCE loomabase_seq TO loomabase_runtime;
 

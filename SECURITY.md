@@ -36,6 +36,12 @@ Loomabase treats every synchronization payload as untrusted input.
   context, and the `tenant_id` is supplied by the authenticated caller, never by
   the payload. Connect as a non-superuser role so the policy is enforced as
   defense in depth.
+- `merge_crdt_states_with_security` and `app_with_config_and_security` run
+  pluggable `SyncAuthorizer` and `SyncValidator` hooks before the LWW merge.
+  Valid cells denied by these hooks are returned in `SyncPayload.rejections`
+  and are not applied.
+- When database audit is enabled, merge decisions are inserted into
+  `loomabase_audit_log` in the same PostgreSQL transaction as the sync.
 - Secrets and bearer tokens must never be stored in synchronized tables.
 
 Conflict resolution is deliberately deterministic, not trust-based. A valid
@@ -44,7 +50,8 @@ so applications must enforce write authorization and domain validation before
 calling the merge. Malformed versions, schema mismatches, type mismatches,
 oversized payloads, spoofed device attribution, cursor forgeries, excessive
 Lamport advances, non-finite numbers, and equal CRDT versions with different
-values are rejected before mutation.
+values are rejected before mutation. Valid cells denied by authorization or
+business validation are structured rejections, not silent drops.
 
 When exposing conflict decisions to users or operators, use
 `explain::explain_lww` instead of reimplementing the ordering rules in an API or
@@ -62,7 +69,8 @@ Validate synchronized data at the application boundary:
 - keep credentials, secrets, access tokens, API keys, and password material out
   of synchronized tables;
 - use PostgreSQL constraints and forced RLS as defense in depth;
-- record audit events for security-sensitive writes and conflict outcomes.
+- keep database audit enabled for security-sensitive deployments, and monitor
+  rejected authorization and validation outcomes.
 
 For browser clients, expose sync endpoints with a strict CORS allowlist:
 

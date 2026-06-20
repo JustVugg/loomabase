@@ -1,6 +1,4 @@
-<p align="center">
-  <img src="loomabase.png" alt="loomabase" width="500"/>
-</p>
+# Loomabase
 
 Loomabase is an open-source, offline-first synchronization engine for applications
 that use SQLite at the edge and PostgreSQL as their system of record. It is
@@ -53,6 +51,15 @@ mixing network concerns into convergence logic.
 - **Bounded untrusted input and output:** identifiers, values, row/cell counts,
   clocks, cursors, response pages, columns, and device attribution are
   validated or capped before mutation.
+- **Policy-aware sync:** authenticated but unauthorized cells can be rejected
+  before LWW merge through pluggable `SyncAuthorizer` and `SyncValidator`
+  hooks.
+- **Structured rejection protocol:** valid cells denied by authorization or
+  business validation are returned in `SyncPayload.rejections`; malformed cells
+  remain hard protocol errors.
+- **Transactional audit log:** PostgreSQL merges can record accepted,
+  idempotent, superseded, authorization-denied, and validation-denied cells in
+  `loomabase_audit_log` inside the same transaction.
 - **Safe Rust core:** `unsafe` is forbidden in the main crate.
 - **Async integration:** PostgreSQL uses SQLx async transactions; blocking
   rusqlite operations run on Tokio's blocking pool behind a `Send + Sync`
@@ -92,6 +99,7 @@ src/
   crdt.rs         Typed protocol, validation, LWW ordering, reference merge
   error.rs        Unified typed errors
   http.rs         Optional HTTP surface and pluggable device authentication
+  policy.rs       Authorization hooks, business validators, rejections, audit
   replica.rs      Partial-replica interests, membership, and eviction protocol
   schema.rs       Declarative table contract; generates DDL, triggers, migrations
   server.rs       Transactional, tenant-scoped PostgreSQL adapter
@@ -313,6 +321,12 @@ authenticated `tenant_id` — never the payload — is the isolation boundary, a
 every server row and clock is keyed by it. Provide your own
 `DeviceAuthenticator` implementation for other token schemes.
 
+Production API surfaces can use `merge_crdt_states_with_security` or
+`http::app_with_config_and_security` to add field authorization, business
+validation, structured rejections, and transactional audit logging without
+forking the merge engine. The default server remains allow-all after JWT/table
+authorization, so application-specific policy should be configured explicitly.
+
 Supabase PostgreSQL and Supabase Auth are supported directly, including
 rotatable asymmetric JWKS and Supavisor transaction mode. See the
 [Supabase integration guide](docs/supabase.md).
@@ -332,7 +346,8 @@ LOOMABASE_JWT_PUBLIC_KEY='...' \
 ```
 
 The runtime role needs DML rights on Loomabase tables plus `USAGE, SELECT` on
-`loomabase_seq`; it must not be a PostgreSQL superuser.
+`loomabase_seq`; it must also have DML rights on `loomabase_audit_log` when
+database audit is enabled. It must not be a PostgreSQL superuser.
 
 ## Language SDKs
 
@@ -370,7 +385,7 @@ cargo run --release --bin loomabase-bench
 Run the local quality gate:
 
 ```bash
-cargo fmt --check
+cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets
 ```
@@ -399,8 +414,9 @@ tests.
 Read [SECURITY.md](SECURITY.md) before production deployment. Loomabase treats
 every sync payload as untrusted input. The CRDT merge is deterministic and
 idempotent, but it is not an authorization system: a valid authenticated writer
-can still submit a valid newer value. Use Loomabase together with application
-authorization, schema contracts, validation, rate limits, and audit logging.
+can still submit a valid newer value. Use Loomabase together with
+application-specific authorization, schema contracts, business validation, rate
+limits, and audit logging.
 
 ### Malicious or Malformed CRDT Updates
 
@@ -425,6 +441,11 @@ rejected because one CRDT version cannot safely identify two different states.
 For user-facing diagnostics, expose `explain::explain_lww` so operators can see
 which value won and why.
 
+Valid but unauthorized cells are not silently ignored. They can be returned to
+the client in `SyncPayload.rejections`, kept dirty on SQLite by
+`complete_sync`, and written to `loomabase_audit_log` when database audit is
+enabled.
+
 ### Data Validation Before Sync
 
 Validate data at the application boundary before it reaches the sync engine.
@@ -445,6 +466,28 @@ Recommended checks:
 For Supabase deployments, keep tenant and table authorization in trusted
 `app_metadata` claims. Do not rely on user-editable `user_metadata` for sync
 authorization.
+
+Example policy wiring:
+
+```rust,no_run
+use std::sync::Arc;
+use loomabase::policy::{
+    AuditMode, ColumnAllowListAuthorizer, MaxTextLengthValidator, SyncSecurity,
+};
+use loomabase::schema::todos_table;
+
+let table = todos_table();
+let security = SyncSecurity::new(
+    Arc::new(ColumnAllowListAuthorizer::new(&table, ["title", "completed"])?),
+    Arc::new(MaxTextLengthValidator::columns(&table, 200, ["title"])?),
+    AuditMode::Database,
+);
+```
+
+Pass that `SyncSecurity` to `merge_crdt_states_with_security` or
+`app_with_config_and_security`. A denied cell is returned as a structured
+rejection instead of being merged; malformed payloads still fail the whole
+request before mutation.
 
 ### Sync Endpoint Hardening
 

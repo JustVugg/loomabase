@@ -68,9 +68,16 @@ The caller opens a SQLx PostgreSQL transaction and passes it to
 2. Lazily creates and locks only the authenticated tenant's `lamport` clock row,
    so concurrent tenants advance their clocks without serializing against each
    other.
-3. Locks each existing cell before applying LWW comparison.
-4. Updates the materialized `todos` table and `todos_crdt` metadata together.
-5. Computes the response from the same transaction snapshot.
+3. Locks each existing cell before applying policy, validation, and LWW
+   comparison.
+4. Runs optional `SyncAuthorizer` and `SyncValidator` hooks. Denied but
+   otherwise valid cells are returned as structured rejections and are not
+   applied.
+5. Updates the materialized `todos` table and `todos_crdt` metadata together
+   for accepted cells.
+6. Inserts audit rows for accepted, idempotent, superseded, and denied cells
+   when database audit is enabled.
+7. Computes the response from the same transaction snapshot.
 
 The caller commits only after successfully serializing the response. Dropping
 or rolling back the transaction prevents partial merges.
@@ -92,6 +99,12 @@ monotonic per-cell `seq`, and every payload carries a cursor: a client sends the
 highest server-issued `seq` page it has applied, and the server returns cells
 written after it, ordered by `seq`. This makes a normal pull an
 `O(changes since the cursor)` change feed instead of an `O(tenant)` scan.
+
+`rejections` contains valid cells that the authenticated request was not
+allowed to merge because an authorization or business-validation hook denied
+them. SQLite acknowledgement skips exact rejected `(row, column, clock, device)`
+versions, so the local application can resolve or surface them instead of
+silently losing the attempted write.
 
 Responses are capped by cell and byte budgets and carry `has_more`; clients use
 `sync_until_caught_up` to apply pages atomically until caught up. Opaque cursor

@@ -32,6 +32,8 @@ LOOMABASE_MIGRATE_ONLY=true \
 Then apply [`supabase/runtime-role.sql`](../supabase/runtime-role.sql) and create
 a login that is a member of `loomabase_runtime`. Do not run the service as the
 Supabase `postgres` role because privileged roles can bypass RLS.
+The runtime role includes DML on synchronized tables, CRDT metadata, cursor
+leases, and `loomabase_audit_log`.
 
 ```sql
 CREATE ROLE loomabase_app LOGIN PASSWORD 'use-a-generated-secret';
