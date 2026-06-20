@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="loomabase.png" alt="loomabase" width="500"/>
+</p>
+
 # Loomabase
 
 Loomabase is an open-source, offline-first synchronization engine for applications
