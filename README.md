@@ -1,4 +1,6 @@
-# Loomabase
+<p align="center">
+  <img src="loomabase.png" alt="loomabase"/>
+</p>
 
 Loomabase is an open-source, offline-first synchronization engine for applications
 that use SQLite at the edge and PostgreSQL as their system of record. It is
