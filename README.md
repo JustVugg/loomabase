@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="loomabase.png" alt="loomabase" width="500"/>
-</p>
-
 # Loomabase
 
 Loomabase is an open-source, offline-first synchronization engine for applications
@@ -125,6 +121,9 @@ tests/
   sqlite_atomicity.rs      Trigger, rollback, acknowledgement, async tests
   model_convergence.rs     Randomized reordered/duplicate delivery model
 loomabase-ffi/             C ABI bindings (cdylib) for language SDKs
+packages/loomabase-js/     npm-ready TypeScript/JavaScript client primitives
+demo/offline-conflicts/    Static visual demo for offline conflict resolution
+demo/phone-desktop/        Real phone + desktop offline reconnect smoke test
 ```
 
 ## Quick Start
@@ -167,6 +166,57 @@ client.sync_until_caught_up(send_to_api).await?;
 # Ok(())
 # }
 ```
+
+Use Loomabase from Node/Electron through the initial TypeScript/JavaScript SDK:
+
+```bash
+npm install @loomabase/client
+```
+
+Repository pre-release usage:
+
+```bash
+npm install ./packages/loomabase-js
+```
+
+```ts
+import {
+  JsonFileTodoReplicaStorage,
+  LoomabaseHttpClient,
+  MemoryTodoReplica,
+  TODOS_TABLE,
+} from "@loomabase/client";
+
+const storage = new JsonFileTodoReplicaStorage("./edge-replica.json");
+const replica = await MemoryTodoReplica.open({
+  deviceId: "device-web-01",
+  table: TODOS_TABLE,
+  storage,
+});
+
+replica.createTodo("todo-1", "Ship offline mode", false);
+
+const client = new LoomabaseHttpClient({
+  endpoint: "https://api.example.com/sync",
+  getToken: async () => supabaseAccessToken,
+});
+
+const response = await replica.syncWith((payload) => client.sync(payload));
+await replica.save(storage);
+
+if (response.rejections?.length) {
+  console.warn("server rejected local cells", response.rejections);
+}
+```
+
+The JavaScript SDK is intentionally explicit about protocol safety: Loomabase
+uses `u64` counters, so the package represents Lamport clocks, cursors, and
+schema fingerprints as `bigint` and provides exact JSON serialization helpers.
+It includes a Node/Electron JSON-file storage adapter and a browser
+`localStorage` adapter for prototypes. Native SQLite storage and browser WASM
+SQLite are future SDK layers; the current package gives developers a usable
+transport, persistent snapshots, in-memory replica, reference sync server,
+typed values, and conflict explanations.
 
 Synchronize a durable partial-replica scope. The server recomputes membership
 after merging local writes and returns a complete authoritative snapshot.
@@ -333,7 +383,8 @@ authorization, so application-specific policy should be configured explicitly.
 
 Supabase PostgreSQL and Supabase Auth are supported directly, including
 rotatable asymmetric JWKS and Supavisor transaction mode. See the
-[Supabase integration guide](docs/supabase.md).
+[Supabase integration guide](docs/supabase.md) and the
+[5-minute Supabase quickstart](docs/quickstart-supabase-5min.md).
 
 Apply schema changes with a migration role, then run the service with a
 non-superuser DML-only role:
@@ -384,6 +435,31 @@ cargo run --example simulation_report
 cargo run --release --bin loomabase-bench
 ```
 
+Run the browser-free SDK tests and the static visual demo:
+
+```bash
+npm --prefix packages/loomabase-js run build
+npm --prefix packages/loomabase-js test
+node examples/js_todo_roundtrip.mjs
+node examples/js_persistent_todo.mjs
+node examples/phone_desktop_offline_reconnect.mjs
+python3 -m http.server 5173
+```
+
+Then open `http://localhost:5173/demo/offline-conflicts/`.
+
+Run the real phone + desktop offline reconnect demo:
+
+```bash
+npm --prefix packages/loomabase-js run build
+node demo/phone-desktop/server.mjs
+```
+
+Open the desktop page at
+`http://localhost:8787/demo/phone-desktop/?device=desktop` and the phone page
+at the LAN URL printed by the server. The full manual test is documented in
+[Offline Reconnect Smoke Test](docs/offline-reconnect-smoke-test.md).
+
 ## Development and Verification
 
 Run the local quality gate:
@@ -392,6 +468,7 @@ Run the local quality gate:
 cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets
+npm --prefix packages/loomabase-js run check
 ```
 
 Run the PostgreSQL integration test:
