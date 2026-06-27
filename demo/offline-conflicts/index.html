@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Loomabase Offline Conflict Demo</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <p class="eyebrow">Loomabase demo</p>
+        <h1>Offline conflict resolution you can see.</h1>
+        <p>
+          Two devices edit a todo while offline. Loomabase merges columns with
+          Lamport clocks and a deterministic device-id tie break.
+        </p>
+      </section>
+
+      <section class="controls" aria-label="Simulation controls">
+        <button id="reset">Reset</button>
+        <button id="independent">Independent offline edits</button>
+        <button id="same-column">Same-column conflict</button>
+        <button id="sync-a">Sync device A</button>
+        <button id="sync-b">Sync device B</button>
+        <button id="pull-both">Pull both</button>
+      </section>
+
+      <section class="grid">
+        <article class="card" id="device-a-card">
+          <h2>Device A</h2>
+          <div class="state" id="device-a"></div>
+        </article>
+        <article class="card server" id="server-card">
+          <h2>Server</h2>
+          <div class="state" id="server"></div>
+        </article>
+        <article class="card" id="device-b-card">
+          <h2>Device B</h2>
+          <div class="state" id="device-b"></div>
+        </article>
+      </section>
+
+      <section class="explain">
+        <h2>Conflict Explanation</h2>
+        <pre id="explanation">Run a scenario to see the LWW decision.</pre>
+      </section>
+
+      <section class="log">
+        <h2>Event Log</h2>
+        <ol id="log"></ol>
+      </section>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
