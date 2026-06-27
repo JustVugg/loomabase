@@ -200,7 +200,7 @@ export class LoomabaseHttpClient {
         this.endpoint = new URL(options.endpoint.toString());
         this.token = options.token;
         this.getToken = options.getToken;
-        this.fetchImpl = options.fetch ?? globalThis.fetch;
+        this.fetchImpl = resolveFetch(options.fetch);
         this.headers = options.headers ?? {};
     }
     async sync(payload) {
@@ -747,6 +747,13 @@ function validateIdentifier(field, value) {
 async function nodeFsPromises() {
     const importer = new Function("specifier", "return import(specifier)");
     return importer("node:fs/promises");
+}
+function resolveFetch(fetchOverride) {
+    const resolved = fetchOverride ?? globalThis.fetch;
+    if (!resolved) {
+        throw new LoomabaseClientError("fetch is not available; pass options.fetch");
+    }
+    return resolved.bind(globalThis);
 }
 function isNodeNotFoundError(error) {
     return (typeof error === "object" &&

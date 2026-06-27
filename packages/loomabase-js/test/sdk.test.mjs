@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   JsonFileTodoReplicaStorage,
   LocalStorageTodoReplicaStorage,
+  LoomabaseHttpClient,
   MemoryTodoReplica,
   ReferenceSyncServer,
   TODOS_TABLE,
@@ -28,6 +29,44 @@ test("serializes and parses u64 wire fields without JavaScript precision loss", 
   assert.match(json, /"schema_fingerprint":11482794215703764405/);
   const decoded = parseSyncPayload(json);
   assert.equal(decoded.schema_fingerprint, 11482794215703764405n);
+});
+
+test("HTTP client binds browser fetch so sync does not fail with illegal invocation", async () => {
+  const originalFetch = globalThis.fetch;
+  const expectedThis = globalThis;
+  try {
+    globalThis.fetch = function (_url, _init) {
+      assert.equal(this, expectedThis);
+      return Promise.resolve(
+        new Response(
+          stringifySyncPayload({
+            protocol_version: 4,
+            schema_fingerprint: fingerprintContract(TODOS_TABLE),
+            source_device_id: "loomabase-server",
+            source_lamport: 1n,
+            changes: [],
+            cursor: 0n,
+            has_more: false,
+            cursor_reset: false,
+            cursor_token: null,
+            server_epoch: null,
+            rejections: [],
+          }),
+          { status: 200 },
+        ),
+      );
+    };
+
+    const client = new LoomabaseHttpClient({
+      endpoint: "https://example.test/sync",
+    });
+    const response = await client.sync(
+      new MemoryTodoReplica({ deviceId: "device-a" }).localDelta(),
+    );
+    assert.equal(response.source_device_id, "loomabase-server");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("reference server converges independent offline column edits", () => {
