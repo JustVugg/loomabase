@@ -25,6 +25,14 @@ The engine is deliberately transport-agnostic and framework-agnostic. It can
 sit behind an HTTP, WebSocket, QUIC, or custom embedded transport without
 mixing network concerns into convergence logic.
 
+## Demo
+
+![Loomabase offline sync demo](docs/assets/loomabase-offline-demo.gif)
+
+Phone and desktop edit the same todo while offline. After reconnect, Loomabase
+keeps both changes because conflicts are resolved at column level instead of
+overwriting the whole row.
+
 ## Core Guarantees
 
 - **Column-level convergence:** independent column updates merge without data
