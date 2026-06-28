@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Loomabase Phone + Desktop Offline Test</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="hero">
+        <p class="eyebrow">Loomabase smoke test</p>
+        <h1>Phone + desktop offline reconnect</h1>
+        <p>
+          Open this page on a phone and a computer. Make edits while offline,
+          reconnect, and verify that both devices converge without losing data.
+        </p>
+      </header>
+
+      <section class="panel controls">
+        <label>
+          Device
+          <select id="device">
+            <option value="phone">phone</option>
+            <option value="desktop">desktop</option>
+          </select>
+        </label>
+        <label>
+          Todo ID
+          <input id="todo-id" value="todo-1" />
+        </label>
+        <label>
+          Title
+          <input id="title" value="Shared Loomabase todo" />
+        </label>
+        <label class="check">
+          <input id="offline" type="checkbox" />
+          Offline mode
+        </label>
+      </section>
+
+      <section class="panel buttons">
+        <button id="reset-server">Reset demo server</button>
+        <button id="reset-local">Reset this device</button>
+        <button id="create">Create shared todo</button>
+        <button id="phone-edit">Phone edits title</button>
+        <button id="desktop-toggle">Desktop toggles completed</button>
+        <button id="sync">Sync / Pull</button>
+      </section>
+
+      <section class="grid">
+        <article class="panel">
+          <h2>Local device</h2>
+          <dl>
+            <dt>Device ID</dt>
+            <dd id="device-id"></dd>
+            <dt>Lamport</dt>
+            <dd id="lamport"></dd>
+            <dt>Cursor</dt>
+            <dd id="cursor"></dd>
+            <dt>Pending rows</dt>
+            <dd id="pending"></dd>
+          </dl>
+          <pre id="local-state"></pre>
+        </article>
+
+        <article class="panel">
+          <h2>Server</h2>
+          <dl>
+            <dt>Server Lamport</dt>
+            <dd id="server-lamport"></dd>
+          </dl>
+          <pre id="server-state"></pre>
+        </article>
+      </section>
+
+      <section class="panel">
+        <h2>Last merge explanation</h2>
+        <pre id="explanations"></pre>
+      </section>
+
+      <section class="panel">
+        <h2>How to prove it</h2>
+        <ol>
+          <li>Reset the demo server and both devices.</li>
+          <li>On the desktop, create the todo and sync.</li>
+          <li>On the phone, sync once to pull the todo.</li>
+          <li>Enable offline mode on both devices.</li>
+          <li>On the phone, edit the title. On the desktop, toggle completed.</li>
+          <li>Disable offline mode. Sync phone, sync desktop, then sync phone again.</li>
+        </ol>
+        <p>
+          The final state should contain the phone title and the desktop
+          completed flag. This works because Loomabase merges each column as a
+          separate CRDT register ordered by Lamport clock and device ID.
+        </p>
+      </section>
+
+      <section class="panel">
+        <h2>Event log</h2>
+        <pre id="log"></pre>
+      </section>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
