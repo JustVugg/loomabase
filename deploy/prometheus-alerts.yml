@@ -1,0 +1,51 @@
+groups:
+  - name: loomabase
+    rules:
+      - alert: LoomabaseUnavailable
+        expr: up{job="loomabase"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Loomabase is unavailable
+      - alert: LoomabaseHighRejectionRate
+        expr: |
+          rate(loomabase_sync_rejected_total[10m])
+          / clamp_min(rate(loomabase_sync_requests_total[10m]), 0.001) > 0.10
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: More than 10% of authenticated sync requests are rejected
+      - alert: LoomabaseAuthFailures
+        expr: rate(loomabase_auth_failed_total[5m]) > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Sustained Loomabase authentication failures
+      - alert: LoomabaseInternalErrors
+        expr: rate(loomabase_sync_internal_errors_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Loomabase is returning internal sync errors
+      - alert: LoomabaseHighSyncLatency
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(loomabase_sync_duration_seconds_bucket[10m]))
+          ) > 5
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Loomabase p95 sync latency exceeds five seconds
+      - alert: LoomabaseSaturated
+        expr: loomabase_sync_in_flight > 100
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Loomabase is close to its default concurrency limit
