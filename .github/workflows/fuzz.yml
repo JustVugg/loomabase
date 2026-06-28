@@ -1,0 +1,22 @@
+name: Fuzz
+
+on:
+  schedule:
+    - cron: "31 2 * * 2"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  payload:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [sync_payload, partial_replica]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo install cargo-fuzz --locked
+      - run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=600
