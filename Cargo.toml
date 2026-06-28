@@ -17,7 +17,7 @@ categories = ["database", "asynchronous"]
 axum = { version = "0.8", optional = true }
 base64 = { version = "0.22", optional = true }
 futures-util = "0.3"
-hmac = { version = "0.12", optional = true }
+hmac = { version = "0.13", optional = true }
 jsonwebtoken = { version = "10.4", optional = true, default-features = false, features = ["aws_lc_rs", "use_pem"] }
 reqwest = { version = "0.12", optional = true, default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
